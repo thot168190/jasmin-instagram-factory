@@ -30,8 +30,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies & Chromium
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
 
       - name: Generate v2 Magazine + Scrapbook 6-slide carousel
         env:

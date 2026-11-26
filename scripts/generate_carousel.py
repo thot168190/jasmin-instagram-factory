@@ -1,20 +1,18 @@
+import base64
+import datetime
+import html
 import json
 import os
-import datetime
 from pathlib import Path
-from io import BytesIO
 from PIL import Image
 from google import genai
-from google.genai import types
+from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
 DOCS = ROOT / "docs"
 HISTORY_FILE = ROOT / "history.json"
-
 AVATAR_REF = ASSETS / "jasmin_color1_cobalt_gold_9x16.jpg"
-REF_MAGAZINE = ASSETS / "ref_1_vogue_magazine.jpg"
-REF_SCRAPBOOK = ASSETS / "ref_2_scrapbook_collage.jpg"
 
 TOPICS = [
     "5 Free AI Prompts That Save 10 Hours a Week",
@@ -25,27 +23,6 @@ TOPICS = [
     "The 2026 One-Person Business AI Stack ($0 to Start)",
     "NotebookLM Tricks Nobody Talks About (Turn Any PDF Into Gold)",
 ]
-
-
-def crop_to_4x5(img: Image.Image) -> Image.Image:
-    w, h = img.size
-    target_ratio = 4 / 5
-    current_ratio = w / h
-    if current_ratio > target_ratio:
-        new_w = int(h * target_ratio)
-        left = (w - new_w) // 2
-        img = img.crop((left, 0, left + new_w, h))
-    else:
-        new_h = int(w / target_ratio)
-        top = (h - new_h) // 2
-        img = img.crop((0, top, w, top + new_h))
-    return img.resize((1080, 1350), Image.Resampling.LANCZOS).convert("RGB")
-
-
-def load_history():
-    if HISTORY_FILE.exists():
-        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-    return {"posts": []}
 
 
 def extract_json(text: str) -> dict:
@@ -59,12 +36,144 @@ def extract_json(text: str) -> dict:
     return json.loads(s[start : end + 1])
 
 
+def load_history():
+    if HISTORY_FILE.exists():
+        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+    return {"posts": []}
+
+
+def esc(t: str) -> str:
+    return html.escape(str(t or ""))
+
+
+def highlight_word(headline: str, word: str) -> str:
+    h = esc(headline)
+    w = esc(word)
+    if w and w.lower() in h.lower():
+        idx = h.lower().find(w.lower())
+        orig = h[idx : idx + len(w)]
+        return h[:idx] + f'<span class="hl">{orig}</span>' + h[idx + len(w) :]
+    return h
+
+
+def build_slide_html(slide: dict, issue_num: int, avatar_b64: str) -> str:
+    num = slide["num"]
+    fonts = """
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,500;1,700&family=Caveat:wght@600;700&family=Anton&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    """
+
+    # SLIDE 1: VOGUE / KINFOLK FULL-BLEED EDITORIAL MAGAZINE COVER (0% corporate!)
+    if num == 1:
+        return f"""<!doctype html><html><head><meta charset="utf-8">{fonts}<style>
+        *{{box-sizing:border-box;margin:0;padding:0}}
+        body{{width:1080px;height:1350px;overflow:hidden;position:relative;background:#071B5B;font-family:'Inter',sans-serif;}}
+        .bg-photo{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 15%;filter:contrast(1.04) saturate(1.06);}}
+        .vignette{{position:absolute;inset:0;background:linear-gradient(180deg, rgba(5,16,58,0.68) 0%, rgba(5,16,58,0.12) 32%, rgba(5,16,58,0.08) 65%, rgba(5,16,58,0.72) 100%);}}
+        .grain{{position:absolute;inset:0;opacity:0.08;background-image:radial-gradient(#fff 1px, transparent 0);background-size:4px 4px;}}
+        .masthead{{position:absolute;top:52px;left:0;right:0;text-align:center;font-size:24px;letter-spacing:0.28em;color:#FDE68A;font-weight:600;text-transform:uppercase;text-shadow:0 2px 12px rgba(0,0,0,0.4);}}
+        .title{{position:absolute;top:105px;left:56px;right:56px;text-align:center;font-family:'Playfair Display',serif;font-weight:900;font-size:128px;line-height:0.96;color:#FFFFFF;letter-spacing:-0.02em;text-shadow:0 12px 35px rgba(4,12,42,0.55);}}
+        .subline{{position:absolute;bottom:118px;left:72px;max-width:680px;font-family:'Playfair Display',serif;font-style:italic;font-size:42px;line-height:1.25;color:#FDE68A;text-shadow:0 4px 20px rgba(0,0,0,0.65);}}
+        .footer{{position:absolute;bottom:48px;left:72px;right:72px;display:flex;justify-content:space-between;align-items:center;color:rgba(255,255,255,0.92);font-size:24px;letter-spacing:0.12em;font-weight:600;}}
+        </style></head><body>
+          <img class="bg-photo" src="{avatar_b64}" />
+          <div class="vignette"></div>
+          <div class="grain"></div>
+          <div class="masthead">JASMIN [VER 1.0] &mdash; ISSUE {issue_num:02d}</div>
+          <div class="title">{esc(slide.get("headline", ""))}</div>
+          <div class="subline">{esc(slide.get("subline", ""))}</div>
+          <div class="footer"><span>@jasmin.ver_1.0</span><span>SWIPE &rarr;</span></div>
+        </body></html>"""
+
+    # SLIDES 2-6: TACTILE CREAM-PAPER SCRAPBOOK & COLLAGE ZINE (0% corporate!)
+    tilt_note = [-2.6, 2.2, -1.8, 2.5, -2.0][num - 2]
+    tilt_photo = [3.5, -3.2, 2.8, -3.5, -4.0][num - 2]
+    hl_headline = highlight_word(slide.get("headline", ""), slide.get("highlight", ""))
+    is_final = num == 6
+
+    polaroid_block = ""
+    if is_final:
+        polaroid_block = f"""
+        <div class="polaroid" style="transform:rotate({tilt_photo}deg);">
+          <div class="tape tape-l"></div>
+          <div class="tape tape-r"></div>
+          <img src="{avatar_b64}" />
+          <div class="pol-cap">Jasmin [Ver 1.0]</div>
+        </div>
+        """
+
+    return f"""<!doctype html><html><head><meta charset="utf-8">{fonts}<style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{
+      width:1080px;height:1350px;overflow:hidden;position:relative;
+      background:#F2EBDD;
+      background-image:
+        radial-gradient(rgba(120,100,70,0.09) 1.2px, transparent 0),
+        radial-gradient(rgba(160,135,95,0.06) 1px, transparent 0);
+      background-size:28px 28px, 19px 19px;
+      background-position:0 0, 9px 11px;
+      color:#161616;font-family:'Inter',sans-serif;
+    }}
+    .wrap{{position:relative;z-index:2;width:100%;height:100%;padding:72px 76px 64px;display:flex;flex-direction:column;justify-content:space-between;}}
+    .top{{display:flex;justify-content:space-between;align-items:center;font-family:'Caveat',cursive;font-size:38px;color:#3F3A32;}}
+    .headline{{font-family:'Anton',sans-serif;font-size:{"92px" if not is_final else "86px"};line-height:1.05;letter-spacing:0.01em;text-transform:uppercase;color:#141414;text-align:center;margin-top:10px;}}
+    .hl{{background:linear-gradient(180deg, transparent 15%, #E7FF3D 15%, #E7FF3D 92%, transparent 92%);padding:0 14px;display:inline-block;transform:rotate(-1deg);}}
+    .polaroid{{
+      width:380px;margin:18px auto 8px;background:#FFFFFF;padding:18px 18px 54px;
+      box-shadow:0 18px 40px rgba(30,24,12,0.22);position:relative;
+    }}
+    .polaroid img{{width:100%;height:340px;object-fit:cover;object-position:center 18%;display:block;}}
+    .pol-cap{{position:absolute;bottom:10px;left:0;right:0;text-align:center;font-family:'Caveat',cursive;font-size:32px;color:#222;}}
+    .tape{{position:absolute;top:-22px;width:128px;height:40px;background:rgba(245,239,220,0.78);box-shadow:0 2px 6px rgba(0,0,0,0.08);}}
+    .tape-l{{left:-22px;transform:rotate(-26deg);}}
+    .tape-r{{right:-22px;transform:rotate(24deg);}}
+    .torn-note{{
+      position:relative;margin:{"12px" if is_final else "36px"} auto;width:88%;
+      background:#FFFCF5;padding:{"38px 46px" if is_final else "56px 54px"};
+      box-shadow:0 20px 45px rgba(35,28,15,0.16);
+      transform:rotate({tilt_note}deg);
+      border-top:4px dashed #DDD3C0;
+      border-bottom:5px dashed #DDD3C0;
+    }}
+    .tape-top{{position:absolute;top:-24px;left:50%;transform:translateX(-50%) rotate(-3deg);width:170px;height:44px;background:rgba(235,226,202,0.82);box-shadow:0 2px 6px rgba(0,0,0,0.08);}}
+    .note-text{{font-family:'Caveat',cursive;font-size:{"46px" if is_final else "58px"};line-height:1.28;color:#1A1A1A;font-weight:700;}}
+    .sub-tip{{margin-top:24px;font-family:'Inter',sans-serif;font-size:27px;line-height:1.45;color:#4A453B;font-weight:600;}}
+    .doodle{{position:absolute;pointer-events:none;}}
+    .foot{{display:flex;justify-content:space-between;align-items:center;font-family:'Caveat',cursive;font-size:40px;font-weight:700;color:#181818;}}
+    </style></head><body>
+      <svg class="doodle" style="top:310px;right:48px;width:110px;height:140px;" viewBox="0 0 110 140" fill="none">
+        <path d="M25 10 C80 35, 90 85, 45 122" stroke="#181818" stroke-width="4.5" stroke-linecap="round"/>
+        <path d="M35 105 L44 124 L65 116" stroke="#181818" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <svg class="doodle" style="bottom:195px;left:44px;width:90px;height:90px;" viewBox="0 0 90 90" fill="none">
+        <path d="M45 8 L53 33 L80 35 L58 51 L66 78 L45 62 L24 78 L32 51 L10 35 L37 33 Z" stroke="#181818" stroke-width="3.5" stroke-linejoin="round"/>
+      </svg>
+      <div class="wrap">
+        <div class="top">
+          <span>Issue #{issue_num:02d} &middot; Jasmin’s Notes</span>
+          <span>0{num} / 06</span>
+        </div>
+        <div class="headline">{hl_headline}</div>
+        {polaroid_block}
+        <div class="torn-note">
+          <div class="tape-top"></div>
+          <div class="note-text">{esc(slide.get("note", ""))}</div>
+          {"<div class='sub-tip'>" + esc(slide.get("tip", "")) + "</div>" if slide.get("tip") else ""}
+        </div>
+        <div class="foot">
+          <span>@jasmin.ver_1.0</span>
+          <span>{"save &amp; follow ★" if is_final else "swipe &rarr;"}</span>
+        </div>
+      </div>
+    </body></html>"""
+
+
 def main():
     api_key = os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
 
     history = load_history()
-    issue_num = len(history["posts"]) + 3  # Starts from Issue 03 (post_001 & post_002 already live)
+    issue_num = len(history["posts"]) + 3
     today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d")
     topic = os.environ.get("TOPIC_OVERRIDE", "").strip()
     if not topic:
@@ -73,31 +182,28 @@ def main():
     out_dir = DOCS / "posts" / f"{today}_issue_{issue_num:02d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Plan 6-slide copy & caption using Gemini text model
     plan_prompt = f"""
 You are the creative director for @jasmin.ver_1.0 (Jasmin [Ver 1.0]), an English global AI virtual creator Instagram account.
-Create a viral, ultra-concise 6-slide Instagram carousel plan for Issue #{issue_num:02d} on the topic: "{topic}".
+Create a viral, ultra-punchy 6-slide Instagram carousel plan for Issue #{issue_num:02d} on the topic: "{topic}".
 
 Rules:
-- Keep every slide super punchy (short headlines, max 12-18 words per slide) so it looks like a luxury magazine & trendy handwritten scrapbook — NEVER like a corporate PowerPoint!
-- Slide 1: Cover hook (2-4 word huge magazine headline + short 5-8 word subtitle).
-- Slides 2-5: 4 concrete actionable tips/tools/prompts (short bold headline + 1 crisp sticky-note tip each).
-- Slide 6: Warm CTA asking to SAVE, COMMENT a 1-word keyword, and FOLLOW @jasmin.ver_1.0.
-- Also write an engaging English Instagram caption with 7 relevant hashtags.
+- Slide 1 (Magazine Cover): "headline" MUST be super short (2-3 words max, e.g. "5 Free Prompts" or "Work Smarter"), "subline" 6-10 words.
+- Slides 2-5 (Handwritten Scrapbook Zine): "headline" 3-6 words, "highlight" 1 key word from headline to highlight in neon yellow, "note" 1 punchy handwritten-style insight (10-16 words), "tip" 1 concrete action/example (10-16 words).
+- Slide 6 (Final CTA): "headline" 3-5 words, "highlight" 1 word, "note" warm CTA with SAVE, COMMENT a 1-word keyword, FOLLOW @jasmin.ver_1.0.
+- "caption": Engaging English Instagram caption with 7 hashtags.
 
-Return STRICT JSON only (no extra prose):
+Return STRICT JSON only:
 {{
   "issue": {issue_num},
   "topic": "{topic}",
-  "keyword": "AI",
   "caption": "...",
   "slides": [
     {{"num": 1, "headline": "...", "subline": "..."}},
-    {{"num": 2, "headline": "...", "note": "..."}},
-    {{"num": 3, "headline": "...", "note": "..."}},
-    {{"num": 4, "headline": "...", "note": "..."}},
-    {{"num": 5, "headline": "...", "note": "..."}},
-    {{"num": 6, "headline": "...", "note": "..."}}
+    {{"num": 2, "headline": "...", "highlight": "...", "note": "...", "tip": "..."}},
+    {{"num": 3, "headline": "...", "highlight": "...", "note": "...", "tip": "..."}},
+    {{"num": 4, "headline": "...", "highlight": "...", "note": "...", "tip": "..."}},
+    {{"num": 5, "headline": "...", "highlight": "...", "note": "...", "tip": "..."}},
+    {{"num": 6, "headline": "...", "highlight": "...", "note": "..."}}
   ]
 }}
 """
@@ -113,74 +219,25 @@ Return STRICT JSON only (no extra prose):
         raise RuntimeError("No text model succeeded")
     plan = extract_json(plan_resp.text)
 
-    avatar_img = Image.open(AVATAR_REF)
-    mag_ref = Image.open(REF_MAGAZINE)
-    scrap_ref = Image.open(REF_SCRAPBOOK)
+    avatar_b64 = "data:image/jpeg;base64," + base64.b64encode(AVATAR_REF.read_bytes()).decode("ascii")
 
-    # 2. Generate 6 slides (Slide 1 = Vogue Magazine Cover, Slides 2-6 = Tactile Scrapbook Zine)
-    for s in plan["slides"]:
-        num = s["num"]
-        if num == 1:
-            img_prompt = (
-                f"Create a 3:4 vertical Vogue x Kinfolk high-fashion editorial magazine cover Instagram slide, "
-                f"matching the exact editorial photography style of reference 2 and the exact face, jet-black bob, "
-                f"ivory gold-button blazer, and sunlit cobalt-blue studio wall of reference 1 (Jasmin). "
-                f"Overlay clean luxury print typography (ZERO boxes, ZERO cards): "
-                f"Top masthead: 'JASMIN [VER 1.0] — ISSUE {issue_num:02d}'. "
-                f"Huge white serif headline partially tucked behind her hair: '{s['headline']}'. "
-                f"Champagne gold italic subline: '{s.get('subline', '')}'. "
-                f"Small 'SWIPE →' at bottom right."
-            )
-            refs = [avatar_img, mag_ref]
-        elif num == 6:
-            img_prompt = (
-                f"Create a 3:4 vertical tactile cream-paper scrapbook zine final CTA slide matching the aesthetic of reference 2. "
-                f"Feature a slightly tilted taped Polaroid of the woman from reference 1 (Jasmin in ivory blazer on cobalt blue). "
-                f"Bold black brutalist headline: '{s['headline']}'. "
-                f"Torn handwritten note below with yellow highlighter and ink doodles: '{s.get('note', '')}'. "
-                f"Bottom text: '@jasmin.ver_1.0' and 'SAVE & FOLLOW ★'. Zero corporate boxes."
-            )
-            refs = [avatar_img, scrap_ref]
-        else:
-            img_prompt = (
-                f"Create a 3:4 vertical tactile cream-paper digital scrapbook & zine Instagram slide matching the exact aesthetic of reference 1: "
-                f"warm fine-grain cream paper background, masking tape, torn paper memo cutout, bright yellow highlighter stroke, "
-                f"hand-drawn black ink arrows and tiny star doodles. Zero corporate boxes or PowerPoint grids. "
-                f"Top small handwritten label: '0{num} / 06'. "
-                f"Bold black editorial headline with key word highlighted in bright yellow: '{s['headline']}'. "
-                f"Torn notebook/receipt paper taped at slight 3-degree tilt with clean handwritten note: '{s.get('note', '')}'. "
-                f"Bottom left: '@jasmin.ver_1.0', bottom right: 'swipe →'."
-            )
-            refs = [scrap_ref]
-
-        resp = None
-        for img_model in ["gemini-2.5-flash-image", "gemini-nano-banana-2.1", "gemini-3-pro-image"]:
-            try:
-                resp = client.models.generate_content(
-                    model=img_model,
-                    contents=[img_prompt, *refs],
-                    config=types.GenerateContentConfig(
-                        response_modalities=["IMAGE"],
-                        image_config=types.ImageConfig(aspect_ratio="3:4"),
-                    ),
-                )
-                print(f"Generated slide {num} with {img_model}")
-                break
-            except Exception as e:
-                print(f"Image model {img_model} skipped: {e}")
-        if resp is None:
-            raise RuntimeError(f"All image models failed for slide {num}")
-        saved = False
-        for part in resp.candidates[0].content.parts:
-            if part.inline_data is not None:
-                im = Image.open(BytesIO(part.inline_data.data))
-                im = crop_to_4x5(im)
-                im.save(out_dir / f"slide_{num}.jpg", "JPEG", quality=92)
-                print(f"Saved slide_{num}.jpg")
-                saved = True
-                break
-        if not saved:
-            raise RuntimeError(f"Failed to generate image for slide {num}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1080, "height": 1350}, device_scale_factor=1)
+        for s in plan["slides"]:
+            num = s["num"]
+            html_file = out_dir / f"slide_{num}.html"
+            png_file = out_dir / f"slide_{num}.png"
+            jpg_file = out_dir / f"slide_{num}.jpg"
+            html_file.write_text(build_slide_html(s, issue_num, avatar_b64), encoding="utf-8")
+            page.goto(f"file://{html_file}", wait_until="networkidle")
+            page.wait_for_timeout(500)
+            page.screenshot(path=str(png_file), full_page=False)
+            Image.open(png_file).convert("RGB").save(jpg_file, "JPEG", quality=92)
+            png_file.unlink()
+            html_file.unlink()
+            print(f"Rendered v2 slide_{num}.jpg")
+        browser.close()
 
     meta = {
         "issue": issue_num,
@@ -195,7 +252,7 @@ Return STRICT JSON only (no extra prose):
 
     history["posts"].append(meta)
     HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("Carousel generation complete:", meta["folder"])
+    print("v2 Magazine + Scrapbook carousel complete:", meta["folder"])
 
 
 if __name__ == "__main__":
