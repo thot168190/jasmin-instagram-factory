@@ -48,9 +48,20 @@ def load_history():
     return {"posts": []}
 
 
+def extract_json(text: str) -> dict:
+    s = text.strip()
+    if "```" in s:
+        s = s.split("```")[1]
+        if s.startswith("json"):
+            s = s[4:]
+    start = s.find("{")
+    end = s.rfind("}")
+    return json.loads(s[start : end + 1])
+
+
 def main():
     api_key = os.environ["GEMINI_API_KEY"]
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
 
     history = load_history()
     issue_num = len(history["posts"]) + 3  # Starts from Issue 03 (post_001 & post_002 already live)
@@ -74,7 +85,7 @@ Rules:
 - Slide 6: Warm CTA asking to SAVE, COMMENT a 1-word keyword, and FOLLOW @jasmin.ver_1.0.
 - Also write an engaging English Instagram caption with 7 relevant hashtags.
 
-Return STRICT JSON only:
+Return STRICT JSON only (no extra prose):
 {{
   "issue": {issue_num},
   "topic": "{topic}",
@@ -90,12 +101,17 @@ Return STRICT JSON only:
   ]
 }}
 """
-    plan_resp = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=plan_prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    plan = json.loads(plan_resp.text)
+    plan_resp = None
+    for text_model in ["gemini-2.5-flash", "gemini-4-hydrogen", "gemini-2.0-flash"]:
+        try:
+            plan_resp = client.models.generate_content(model=text_model, contents=plan_prompt)
+            print("Planned copy using:", text_model)
+            break
+        except Exception as e:
+            print(f"Text model {text_model} skipped: {e}")
+    if plan_resp is None:
+        raise RuntimeError("No text model succeeded")
+    plan = extract_json(plan_resp.text)
 
     avatar_img = Image.open(AVATAR_REF)
     mag_ref = Image.open(REF_MAGAZINE)
@@ -137,14 +153,23 @@ Return STRICT JSON only:
             )
             refs = [scrap_ref]
 
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash-image",
-            contents=[img_prompt, *refs],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(aspect_ratio="3:4"),
-            ),
-        )
+        resp = None
+        for img_model in ["gemini-2.5-flash-image", "gemini-nano-banana-2.1", "gemini-3-pro-image"]:
+            try:
+                resp = client.models.generate_content(
+                    model=img_model,
+                    contents=[img_prompt, *refs],
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE"],
+                        image_config=types.ImageConfig(aspect_ratio="3:4"),
+                    ),
+                )
+                print(f"Generated slide {num} with {img_model}")
+                break
+            except Exception as e:
+                print(f"Image model {img_model} skipped: {e}")
+        if resp is None:
+            raise RuntimeError(f"All image models failed for slide {num}")
         saved = False
         for part in resp.candidates[0].content.parts:
             if part.inline_data is not None:
