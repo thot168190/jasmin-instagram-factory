@@ -1,0 +1,60 @@
+name: Daily Jasmin Ver 1.0 Carousel Factory
+
+on:
+  schedule:
+    # Runs every day at 00:00 UTC = 09:00 KST (even when your Mac is OFF!)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      topic_override:
+        description: 'Optional custom topic for today (leave blank for auto)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Generate images & push to Pages without publishing to IG (true/false)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  generate-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate v2 Magazine + Scrapbook 6-slide carousel
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TOPIC_OVERRIDE: ${{ github.event.inputs.topic_override }}
+        run: python scripts/generate_carousel.py
+
+      - name: Commit & push generated images to GitHub Pages
+        run: |
+          git config user.name "Jasmin Factory Bot"
+          git config user.email "bot@jasmin-studio.local"
+          git add docs/ history.json
+          git diff --staged --quiet || git commit -m "chore: generate daily carousel $(date -u +%Y-%m-%d)"
+          git push
+
+      - name: Wait 35s for GitHub Pages CDN deployment
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: sleep 35
+
+      - name: Publish 6-slide carousel to @jasmin.ver_1.0 via Instagram API
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          PAGES_BASE_URL: https://thot168190.github.io/jasmin-instagram-factory
+        run: python scripts/publish_instagram.py
