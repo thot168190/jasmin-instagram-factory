@@ -1,9 +1,9 @@
 name: Daily Jasmin Ver 1.0 Carousel Factory
 
 on:
-  schedule:
-    # Runs every day at 00:00 UTC = 09:00 KST (even when your Mac is OFF!)
-    - cron: '0 0 * * *'
+  # PAUSED by CEO (2026-11-26): Switched to manual-only mode until v3 quality upgrade
+  # schedule:
+  #   - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       topic_override:
